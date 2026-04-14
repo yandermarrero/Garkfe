@@ -1,0 +1,90 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  
+  --color-brand-50: #f8fafc;
+  --color-brand-100: #f1f5f9;
+  --color-brand-200: #e2e8f0;
+  --color-brand-300: #cbd5e1;
+  --color-brand-400: #94a3b8;
+  --color-brand-500: #64748b;
+  --color-brand-600: #475569;
+  --color-brand-700: #334155;
+  --color-brand-800: #1e293b;
+  --color-brand-900: #0f172a;
+  --color-brand-950: #020617;
+}
+
+@layer base {
+  body {
+    @apply bg-[#F8F9FA] text-slate-900 font-sans antialiased selection:bg-slate-900 selection:text-white transition-colors duration-300;
+  }
+
+  .dark body {
+    @apply bg-[#0B0E14] text-slate-100 selection:bg-slate-100 selection:text-slate-900;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white rounded-[24px] border border-slate-200/60 shadow-[0_2px_8px_rgba(0,0,0,0.04)] transition-all duration-300 hover:shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:border-slate-300/60;
+  }
+
+  .dark .card {
+    @apply bg-[#161B22] border-slate-800/60 shadow-[0_4px_20px_rgba(0,0,0,0.2)] hover:border-slate-700/60 hover:shadow-[0_8px_40px_rgba(0,0,0,0.3)];
+  }
+  
+  .btn-primary {
+    @apply bg-slate-900 text-white px-6 py-3 rounded-2xl font-semibold text-sm transition-all hover:bg-slate-800 active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none shadow-lg shadow-slate-900/10 flex items-center justify-center gap-2;
+  }
+
+  .dark .btn-primary {
+    @apply bg-slate-100 text-slate-900 hover:bg-white shadow-slate-100/5;
+  }
+
+  .btn-secondary {
+    @apply bg-white text-slate-700 border border-slate-200 px-6 py-3 rounded-2xl font-semibold text-sm transition-all hover:bg-slate-50 hover:border-slate-300 active:scale-[0.98] flex items-center justify-center gap-2;
+  }
+
+  .dark .btn-secondary {
+    @apply bg-[#161B22] text-slate-300 border-slate-800 hover:bg-slate-800 hover:border-slate-700;
+  }
+
+  .input-field {
+    @apply w-full border border-slate-200 rounded-2xl px-4 py-3 text-sm font-medium focus:outline-none focus:ring-4 focus:ring-slate-900/5 focus:border-slate-900 transition-all bg-white placeholder:text-slate-400;
+  }
+
+  .dark .input-field {
+    @apply bg-[#0B0E14] border-slate-800 text-slate-100 focus:ring-slate-100/5 focus:border-slate-600 placeholder:text-slate-600;
+  }
+
+  .segmented-control {
+    @apply flex p-1 bg-slate-100 rounded-2xl border border-slate-200/60;
+  }
+
+  .dark .segmented-control {
+    @apply bg-[#0B0E14] border-slate-800;
+  }
+
+  .segmented-item {
+    @apply flex-1 px-4 py-2 rounded-xl text-[11px] font-bold uppercase tracking-wider transition-all text-center;
+  }
+
+  .segmented-item-active {
+    @apply bg-white text-slate-900 shadow-sm;
+  }
+
+  .dark .segmented-item-active {
+    @apply bg-[#161B22] text-slate-100;
+  }
+
+  .segmented-item-inactive {
+    @apply text-slate-500 hover:text-slate-700;
+  }
+
+  .dark .segmented-item-inactive {
+    @apply text-slate-500 hover:text-slate-400;
+  }
+}
