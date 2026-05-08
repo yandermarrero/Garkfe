@@ -13,6 +13,7 @@ export interface Product {
   category?: string;
   minStock?: number;
   unit?: string;
+  archived?: boolean;
 }
 
 export interface InventoryItem {
@@ -29,6 +30,7 @@ export interface TransactionItem {
   quantity: number;
   price: number;
   costPrice?: number;
+  type?: 'sale' | 'shrinkage';
 }
 
 export interface Transaction {
@@ -234,9 +236,9 @@ export class InventoryDB extends Dexie {
       storePrices: '++id, storeId, productId, [storeId+productId]',
       users: '++id, username, role'
     });
-    this.version(9).stores({
+    this.version(10).stores({
       stores: '++id, name',
-      products: '++id, name',
+      products: '++id, name, archived',
       inventory: '++id, storeId, productId, [storeId+productId]',
       transactions: '++id, type, date, fromStoreId, toStoreId',
       expenses: '++id, storeId, date, transactionId, purchaseId, debtId',

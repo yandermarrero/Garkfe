@@ -6,7 +6,23 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function formatCurrency(amount: number) {
-  return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(amount);
+  return new Intl.NumberFormat('es-US', { 
+    style: 'currency', 
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(amount).replace('USD', '$');
+}
+
+export function formatNumber(amount: number | string) {
+  const n = typeof amount === 'string' ? parseFloat(amount) : amount;
+  if (isNaN(n)) return '0.00';
+  // Use a more robust rounding for financial numbers
+  const rounded = Math.round((n + Number.EPSILON) * 100) / 100;
+  return rounded.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
 }
 
 export function formatDate(dateString: string) {

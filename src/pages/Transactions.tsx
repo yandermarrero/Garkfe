@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../lib/db';
-import { formatCurrency, toLocalISO, fromLocalISO, cn } from '../lib/utils';
+import { formatCurrency, formatNumber, toLocalISO, fromLocalISO, cn } from '../lib/utils';
 import { Trash2, AlertTriangle, CheckCircle, XCircle, Filter, Edit, Lock, Search } from 'lucide-react';
 import { useStoreContext } from '../lib/StoreContext';
 import { useAuth } from '../lib/AuthContext';
@@ -52,7 +52,11 @@ export default function Transactions() {
         origin: getStoreName(tx.fromStoreId),
         destination: tx.toStoreId ? getStoreName(tx.toStoreId) : (tx.customerName || '-'),
         items: tx.items,
-        totalAmount: tx.totalAmount
+        totalAmount: tx.totalAmount,
+        extraExpense: tx.extraExpense,
+        extraExpenseAccount: tx.extraExpenseAccount,
+        extraIncome: tx.extraIncome,
+        extraIncomeAccount: tx.extraIncomeAccount
       }))];
     }
 
@@ -67,7 +71,12 @@ export default function Transactions() {
         destination: getStoreName(p.storeId),
         items: p.items,
         totalAmount: p.totalAmount,
-        paymentStatus: p.paymentStatus
+        paymentStatus: p.paymentStatus,
+        paymentMethod: p.paymentMethod,
+        extraExpense: p.extraExpense,
+        extraExpenseAccount: p.extraExpenseAccount,
+        extraIncome: p.extraIncome,
+        extraIncomeAccount: p.extraIncomeAccount
       }))];
     }
 
@@ -220,6 +229,10 @@ export default function Transactions() {
             date: data.date,
             customerName: data.customerName,
             totalAmount: parseFloat(data.totalAmount),
+            extraExpense: parseFloat(data.extraExpense) || 0,
+            extraExpenseAccount: data.extraExpenseAccount,
+            extraIncome: parseFloat(data.extraIncome) || 0,
+            extraIncomeAccount: data.extraIncomeAccount,
             items: data.items.map((item: any) => ({
               ...item,
               quantity: parseFloat(item.quantity),
@@ -246,11 +259,33 @@ export default function Transactions() {
           // 4. Update associated debts and expenses
           const debts = await db.debts.where('transactionId').equals(originalId).toArray();
           for (const d of debts) {
-            await db.debts.update(d.id!, { amount: updatedTx.totalAmount, date: updatedTx.date });
+            if (updatedTx.type === 'consignment') {
+              // For consignments, the debt IS the total amount
+              await db.debts.update(d.id!, { amount: updatedTx.totalAmount, date: updatedTx.date });
+            } else {
+              // For sales, we only update the date. 
+              // We DON'T update the amount because it could be a shortage or a specific credit client amount
+              // which are not currently editable in the modal and would be overwritten incorrectly.
+              await db.debts.update(d.id!, { date: updatedTx.date });
+            }
           }
-          const exps = await db.expenses.where('transactionId').equals(originalId).toArray();
-          for (const e of exps) {
-            await db.expenses.update(e.id!, { date: updatedTx.date });
+          
+          // Update associated expenses/incomes correctly
+          const associatedExps = await db.expenses.where('transactionId').equals(originalId).toArray();
+          for (const e of associatedExps) {
+            const updates: any = { date: updatedTx.date };
+            
+            // Only update amounts if they are the specific extra expense/income records
+            if (e.description.includes('Gasto extra')) {
+              updates.amount = updatedTx.extraExpense;
+              updates.paymentMethod = updatedTx.extraExpenseAccount;
+            } else if (e.description.includes('Ingreso extra')) {
+              updates.amount = updatedTx.extraIncome;
+              updates.paymentMethod = updatedTx.extraIncomeAccount;
+            }
+            // For other expenses like 'Merma' or 'Sobrante', we only update the date
+            
+            await db.expenses.update(e.id!, updates);
           }
         } else if (opType === 'purchase') {
           const oldP = await db.purchases.get(originalId);
@@ -271,6 +306,13 @@ export default function Transactions() {
             ...oldP,
             date: data.date,
             totalAmount: parseFloat(data.totalAmount),
+            paymentStatus: data.paymentStatus,
+            paymentMethod: data.paymentStatus === 'paid' ? (data.paymentMethod || 'cash') : undefined,
+            supplierId: data.supplierId,
+            extraExpense: parseFloat(data.extraExpense) || 0,
+            extraExpenseAccount: data.extraExpenseAccount,
+            extraIncome: parseFloat(data.extraIncome) || 0,
+            extraIncomeAccount: data.extraIncomeAccount,
             items: data.items.map((item: any) => ({
               ...item,
               quantity: parseFloat(item.quantity),
@@ -289,12 +331,87 @@ export default function Transactions() {
 
           // 4. Update associated debts and expenses
           const debts = await db.debts.where('purchaseId').equals(originalId).toArray();
-          for (const d of debts) {
-            await db.debts.update(d.id!, { amount: updatedP.totalAmount, date: updatedP.date });
+          
+          if (updatedP.paymentStatus === 'credit') {
+            if (debts.length > 0) {
+              // Update existing debt
+              for (const d of debts) {
+                await db.debts.update(d.id!, { 
+                  amount: updatedP.totalAmount, 
+                  date: updatedP.date,
+                  supplierId: updatedP.supplierId
+                });
+              }
+            } else {
+              // Create new debt
+              await db.debts.add({
+                debtorStoreId: updatedP.storeId,
+                supplierId: updatedP.supplierId,
+                purchaseId: originalId,
+                amount: updatedP.totalAmount,
+                status: 'pending',
+                date: updatedP.date,
+                type: 'payable'
+              });
+            }
+          } else {
+            // It's now 'paid', delete any associated debts
+            for (const d of debts) {
+              await db.debts.delete(d.id!);
+              // Also find and delete payments for this debt
+              const debtPayments = await db.expenses.where('debtId').equals(d.id!).toArray();
+              for (const dp of debtPayments) {
+                await db.expenses.delete(dp.id!);
+              }
+            }
           }
+
+          // Handle main purchase expense (Treasury)
+          const mainExps = await db.expenses.where('purchaseId').equals(originalId).toArray();
+          const mainPurchaseExp = mainExps.find(e => e.description.includes('Pago de compra al contado'));
+          
+          if (updatedP.paymentStatus === 'paid') {
+            if (mainPurchaseExp) {
+              await db.expenses.update(mainPurchaseExp.id!, {
+                amount: updatedP.totalAmount,
+                date: updatedP.date,
+                paymentMethod: updatedP.paymentMethod
+              });
+            } else {
+              await db.expenses.add({
+                storeId: updatedP.storeId,
+                date: updatedP.date,
+                description: `Pago de compra al contado #${originalId}`,
+                amount: updatedP.totalAmount,
+                type: 'expense',
+                paymentMethod: updatedP.paymentMethod,
+                purchaseId: originalId
+              });
+            }
+          } else {
+            // If it's now credit/consignment, remove the main expense if it existed
+            if (mainPurchaseExp) {
+              await db.expenses.delete(mainPurchaseExp.id!);
+            }
+          }
+
           const exps = await db.expenses.where('purchaseId').equals(originalId).toArray();
           for (const e of exps) {
-            await db.expenses.update(e.id!, { date: updatedP.date });
+            if (e.type === 'expense') {
+              await db.expenses.update(e.id!, { 
+                date: updatedP.date,
+                amount: updatedP.extraExpense,
+                paymentMethod: updatedP.extraExpenseAccount
+              });
+            } else if (e.type === 'income') {
+              await db.expenses.update(e.id!, { 
+                date: updatedP.date,
+                amount: updatedP.extraIncome,
+                paymentMethod: updatedP.extraIncomeAccount
+              });
+            } else {
+              await db.expenses.update(e.id!, { date: updatedP.date });
+            }
           }
         }
       });
@@ -442,6 +559,9 @@ export default function Transactions() {
                     dateAdded: new Date().toISOString()
                   });
                 }
+                
+                // Unarchive if it was archived
+                await db.products.update(item.productId, { archived: false });
 
                 if (tx.toStoreId) {
                   const destBatches = await db.inventory.where({ storeId: tx.toStoreId, productId: item.productId }).toArray();
@@ -498,6 +618,13 @@ export default function Transactions() {
                   } else {
                      await db.inventory.update(batch.id!, { quantity: batch.quantity - item.quantity });
                   }
+                }
+
+                // Check for auto-archiving (purchase deleted, stock might be 0)
+                const totalStockAfter = await db.inventory.where('productId').equals(item.productId).toArray();
+                const totalQty = totalStockAfter.reduce((sum, b) => sum + b.quantity, 0);
+                if (totalQty <= 0) {
+                  await db.products.update(item.productId, { archived: true });
                 }
               }
 
@@ -570,16 +697,148 @@ export default function Transactions() {
                       className="input-field"
                     />
                   ) : (
-                    <select
-                      value={editModal.data.supplierId}
-                      onChange={(e) => setEditModal({ ...editModal, data: { ...editModal.data, supplierId: parseInt(e.target.value) } })}
-                      className="input-field"
-                    >
-                      {suppliers?.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                    </select>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <select
+                        value={editModal.data.supplierId}
+                        onChange={(e) => setEditModal({ ...editModal, data: { ...editModal.data, supplierId: parseInt(e.target.value) } })}
+                        className="input-field"
+                      >
+                        {suppliers?.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                      </select>
+                      <select
+                        value={editModal.data.paymentStatus}
+                        onChange={(e) => setEditModal({ ...editModal, data: { ...editModal.data, paymentStatus: e.target.value } })}
+                        className="input-field"
+                      >
+                        <option value="paid">Pagado (Contado)</option>
+                        <option value="credit">Crédito (Por Pagar)</option>
+                      </select>
+                    </div>
                   )}
                 </div>
               </div>
+
+              {editModal.opType === 'purchase' && editModal.data.paymentStatus === 'paid' && (
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest ml-1">Método de Pago Principal</label>
+                    <div className="grid grid-cols-2 gap-4">
+                      <button
+                        type="button"
+                        onClick={() => setEditModal({ ...editModal, data: { ...editModal.data, paymentMethod: 'cash' } })}
+                        className={cn(
+                          "p-3 rounded-xl text-xs font-bold transition-all border",
+                          editModal.data.paymentMethod === 'cash'
+                            ? "bg-indigo-600 border-indigo-600 text-white shadow-lg shadow-indigo-600/20"
+                            : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:border-indigo-400"
+                        )}
+                      >
+                        Efectivo
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditModal({ ...editModal, data: { ...editModal.data, paymentMethod: 'transfer' } })}
+                        className={cn(
+                          "p-3 rounded-xl text-xs font-bold transition-all border",
+                          editModal.data.paymentMethod === 'transfer'
+                            ? "bg-indigo-600 border-indigo-600 text-white shadow-lg shadow-indigo-600/20"
+                            : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:border-indigo-400"
+                        )}
+                      >
+                        Transferencia
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                    <div className="space-y-2">
+                      <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest ml-1 text-rose-500">Gasto Extra</label>
+                      <div className="flex gap-2">
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={editModal.data.extraExpense || 0}
+                          onChange={(e) => setEditModal({ ...editModal, data: { ...editModal.data, extraExpense: e.target.value } })}
+                          className="input-field flex-1"
+                        />
+                        <select
+                          value={editModal.data.extraExpenseAccount || 'cash'}
+                          onChange={(e) => setEditModal({ ...editModal, data: { ...editModal.data, extraExpenseAccount: e.target.value } })}
+                          className="w-24 input-field text-[10px]"
+                        >
+                          <option value="cash">Efectivo</option>
+                          <option value="transfer">Transf.</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest ml-1 text-emerald-500">Ingreso Extra</label>
+                      <div className="flex gap-2">
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={editModal.data.extraIncome || 0}
+                          onChange={(e) => setEditModal({ ...editModal, data: { ...editModal.data, extraIncome: e.target.value } })}
+                          className="input-field flex-1"
+                        />
+                        <select
+                          value={editModal.data.extraIncomeAccount || 'cash'}
+                          onChange={(e) => setEditModal({ ...editModal, data: { ...editModal.data, extraIncomeAccount: e.target.value } })}
+                          className="w-24 input-field text-[10px]"
+                        >
+                          <option value="cash">Efectivo</option>
+                          <option value="transfer">Transf.</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {editModal.opType === 'transaction' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                   <div className="space-y-2">
+                      <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest ml-1 text-rose-500">Gasto Extra</label>
+                      <div className="flex gap-2">
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={editModal.data.extraExpense || 0}
+                          onChange={(e) => setEditModal({ ...editModal, data: { ...editModal.data, extraExpense: e.target.value } })}
+                          className="input-field flex-1"
+                        />
+                        <select
+                          value={editModal.data.extraExpenseAccount || 'cash'}
+                          onChange={(e) => setEditModal({ ...editModal, data: { ...editModal.data, extraExpenseAccount: e.target.value } })}
+                          className="w-24 input-field text-[10px]"
+                        >
+                          <option value="cash">Efectivo</option>
+                          <option value="transfer">Transf.</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest ml-1 text-emerald-500">Ingreso Extra</label>
+                      <div className="flex gap-2">
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={editModal.data.extraIncome || 0}
+                          onChange={(e) => setEditModal({ ...editModal, data: { ...editModal.data, extraIncome: e.target.value } })}
+                          className="input-field flex-1"
+                        />
+                        <select
+                          value={editModal.data.extraIncomeAccount || 'cash'}
+                          onChange={(e) => setEditModal({ ...editModal, data: { ...editModal.data, extraIncomeAccount: e.target.value } })}
+                          className="w-24 input-field text-[10px]"
+                        >
+                          <option value="cash">Efectivo</option>
+                          <option value="transfer">Transf.</option>
+                        </select>
+                      </div>
+                    </div>
+                </div>
+              )}
 
               <div className="space-y-3">
                 <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest ml-1">Productos</label>
@@ -707,7 +966,7 @@ export default function Transactions() {
                   <div>
                     <p className="text-sm font-bold text-slate-900 dark:text-slate-100 mb-1">{getProductName(item.productId)}</p>
                     <p className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
-                      Comprados: {item.quantity} | Costo Original: {formatCurrency(item.costPrice)}
+                      Comprados: {formatNumber(item.quantity)} | Costo Original: {formatCurrency(item.costPrice)}
                     </p>
                   </div>
                   {adjustingItemIndex === idx ? (
@@ -856,7 +1115,11 @@ export default function Transactions() {
                         op.type === 'consignment' ? "bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border-amber-100 dark:border-amber-900/30" :
                         "bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 border-blue-100 dark:border-blue-900/30"
                       )}>
-                        {op.type === 'sale' ? 'Venta' : op.type === 'consignment' ? 'Consign.' : 'Compra'}
+                        {op.type === 'sale' ? 'Venta' : op.type === 'consignment' ? 'Consign.' : (
+                          <>
+                            Compra {op.paymentMethod && <span className="ml-1 opacity-60">({op.paymentMethod === 'cash' ? 'Efe' : 'Trf'})</span>}
+                          </>
+                        )}
                       </span>
                     </td>
                     <td className="px-6 py-4">
@@ -869,7 +1132,7 @@ export default function Transactions() {
                       <div className="flex flex-wrap gap-1.5 max-w-xs">
                         {op.items.map((item: any, idx: number) => (
                           <span key={idx} className="bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 px-2 py-0.5 rounded text-[10px] font-bold border border-slate-200 dark:border-slate-700">
-                            {getProductName(item.productId)} ({item.quantity})
+                            {getProductName(item.productId)} ({formatNumber(item.quantity)})
                           </span>
                         ))}
                       </div>

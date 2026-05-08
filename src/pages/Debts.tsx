@@ -31,7 +31,9 @@ export default function Debts() {
     description: '',
     date: new Date().toISOString().split('T')[0],
     isStoreTransfer: false,
-    otherStoreId: ''
+    otherStoreId: '',
+    affectTreasury: true,
+    paymentMethod: 'cash' as 'cash' | 'transfer'
   });
 
   const handleCreateManualDebt = async (e: React.FormEvent) => {
@@ -57,17 +59,52 @@ export default function Debts() {
 
     if (!finalEntityName) return;
 
-    await db.debts.add({
-      amount,
-      date: new Date(manualDebt.date).toISOString(),
-      status: 'pending',
-      type: manualDebt.type,
-      debtorName: manualDebt.type === 'receivable' ? finalEntityName : undefined,
-      creditorName: manualDebt.type === 'payable' ? finalEntityName : undefined,
-      supplierId: manualDebt.type === 'payable' ? 0 : undefined,
-      description: manualDebt.description,
-      creditorStoreId,
-      debtorStoreId,
+    await db.transaction('rw', db.debts, db.expenses, async () => {
+      const debtId = await db.debts.add({
+        amount,
+        date: new Date(manualDebt.date).toISOString(),
+        status: 'pending',
+        type: manualDebt.type,
+        debtorName: manualDebt.type === 'receivable' ? finalEntityName : undefined,
+        creditorName: manualDebt.type === 'payable' ? finalEntityName : undefined,
+        supplierId: manualDebt.type === 'payable' ? 0 : undefined,
+        description: manualDebt.description,
+        creditorStoreId,
+        debtorStoreId,
+      });
+
+      if (manualDebt.affectTreasury && activeStoreId) {
+        // For receivables (lending): active store has an expense (outflow)
+        // For payables (borrowing): active store has an income (inflow)
+        const isIncome = manualDebt.type === 'payable';
+        
+        await db.expenses.add({
+          storeId: activeStoreId,
+          amount: amount,
+          date: new Date(manualDebt.date).toISOString(),
+          description: `${isIncome ? 'Ingreso por préstamo recibido' : 'Egreso por préstamo otorgado'} (${finalEntityName}): ${manualDebt.description}`,
+          type: isIncome ? 'income' : 'expense',
+          paymentMethod: manualDebt.paymentMethod,
+          debtId: debtId as number
+        });
+
+        // If it's a store transfer, the OTHER store treasury also needs to be affected
+        if (manualDebt.isStoreTransfer && manualDebt.otherStoreId) {
+          const otherSId = parseInt(manualDebt.otherStoreId);
+          const currentStore = stores?.find(s => s.id === activeStoreId);
+          // For receivables: other store is getting money (income)
+          // For payables: other store is giving money (expense)
+          await db.expenses.add({
+            storeId: otherSId,
+            amount: amount,
+            date: new Date(manualDebt.date).toISOString(),
+            description: `${isIncome ? 'Egreso por préstamo otorgado' : 'Ingreso por préstamo recibido'} (${currentStore?.name}): ${manualDebt.description}`,
+            type: isIncome ? 'expense' : 'income',
+            paymentMethod: manualDebt.paymentMethod,
+            debtId: debtId as number
+          });
+        }
+      }
     });
 
     setIsManualModalOpen(false);
@@ -78,7 +115,9 @@ export default function Debts() {
       description: '',
       date: new Date().toISOString().split('T')[0],
       isStoreTransfer: false,
-      otherStoreId: ''
+      otherStoreId: '',
+      affectTreasury: true,
+      paymentMethod: 'cash'
     });
   };
   const [editModal, setEditModal] = useState<{ isOpen: boolean, debt?: Debt }>({ isOpen: false });
@@ -190,19 +229,47 @@ export default function Debts() {
     e.preventDefault();
     if (!editModal.debt) return;
     const debt = editModal.debt;
-    await db.debts.update(debt.id!, {
-      amount: debt.amount,
-      date: debt.date,
-      description: debt.description,
-      debtorName: debt.debtorName,
-      creditorName: debt.creditorName
+
+    await db.transaction('rw', db.debts, db.expenses, async () => {
+      await db.debts.update(debt.id!, {
+        amount: debt.amount,
+        date: debt.date,
+        description: debt.description,
+        debtorName: debt.debtorName,
+        creditorName: debt.creditorName
+      });
+
+      // Update associated initial expense (the one that recorded the lending/borrowing)
+      const associatedExpenses = await db.expenses.where('debtId').equals(debt.id!).toArray();
+      const initialExpense = associatedExpenses.find(ex => !['debt_payment'].includes(ex.type || ''));
+      
+      if (initialExpense) {
+        await db.expenses.update(initialExpense.id!, {
+          amount: debt.amount,
+          date: debt.date,
+          description: `${initialExpense.type === 'income' ? 'Ingreso por préstamo recibido' : 'Egreso por préstamo otorgado'} (${isReceivable(debt) ? (debt.debtorName || debt.debtorStoreId) : (debt.creditorName || debt.creditorStoreId)}): ${debt.description}`,
+          paymentMethod: debt.paymentMethod
+        });
+      }
     });
+
     setEditModal({ isOpen: false });
   };
 
   const handleDeleteDebt = async () => {
     if (!deleteModal.id) return;
-    await db.debts.delete(deleteModal.id);
+    
+    await db.transaction('rw', [db.debts, db.expenses], async () => {
+      // Delete the debt
+      await db.debts.delete(deleteModal.id!);
+      
+      // Delete all associated payments/treasury impacts
+      const associatedExpenses = await db.expenses.where('debtId').equals(deleteModal.id!).toArray();
+      for (const e of associatedExpenses) {
+        await db.expenses.delete(e.id!);
+      }
+    });
+
     setDeleteModal({ isOpen: false });
   };
 
@@ -245,29 +312,55 @@ export default function Debts() {
       // If it's a transfer between stores, we record both the expense in the debtor store 
       // and the income in the creditor store to keep both treasuries balanced.
       if (debt.creditorStoreId && debt.debtorStoreId) {
-        // Record Expense in Debtor Store
-        await db.expenses.add({
-          storeId: debt.debtorStoreId,
-          date: new Date().toISOString(),
-          description: `Pago a cuenta (Inter-sucursal): ${getCreditorName(debt)}`,
-          amount: totalToPay,
-          type: 'debt_payment',
-          debtType: 'payment',
-          paymentMethod: cash > 0 ? 'cash' : 'transfer',
-          debtId: debt.id
-        });
+        // Record Cash Payment if any
+        if (cash > 0) {
+          await db.expenses.add({
+            storeId: debt.debtorStoreId,
+            date: new Date().toISOString(),
+            description: `Pago a cuenta (Efectivo) (Inter-sucursal): ${getCreditorName(debt)}`,
+            amount: cash,
+            type: 'debt_payment',
+            debtType: 'payment',
+            paymentMethod: 'cash',
+            debtId: debt.id
+          });
+          
+          await db.expenses.add({
+            storeId: debt.creditorStoreId,
+            date: new Date().toISOString(),
+            description: `Cobro a cuenta (Efectivo) (Inter-sucursal): ${getDebtorName(debt)}`,
+            amount: cash,
+            type: 'debt_payment',
+            debtType: 'collection',
+            paymentMethod: 'cash',
+            debtId: debt.id
+          });
+        }
         
-        // Record Income in Creditor Store
-        await db.expenses.add({
-          storeId: debt.creditorStoreId,
-          date: new Date().toISOString(),
-          description: `Cobro a cuenta (Inter-sucursal): ${getDebtorName(debt)}`,
-          amount: totalToPay,
-          type: 'debt_payment',
-          debtType: 'collection',
-          paymentMethod: cash > 0 ? 'cash' : 'transfer',
-          debtId: debt.id
-        });
+        // Record Transfer Payment if any
+        if (transfer > 0) {
+          await db.expenses.add({
+            storeId: debt.debtorStoreId,
+            date: new Date().toISOString(),
+            description: `Pago a cuenta (Transferencia) (Inter-sucursal): ${getCreditorName(debt)}`,
+            amount: transfer,
+            type: 'debt_payment',
+            debtType: 'payment',
+            paymentMethod: 'transfer',
+            debtId: debt.id
+          });
+          
+          await db.expenses.add({
+            storeId: debt.creditorStoreId,
+            date: new Date().toISOString(),
+            description: `Cobro a cuenta (Transferencia) (Inter-sucursal): ${getDebtorName(debt)}`,
+            amount: transfer,
+            type: 'debt_payment',
+            debtType: 'collection',
+            paymentMethod: 'transfer',
+            debtId: debt.id
+          });
+        }
       } else {
         // Standard debt payment (to/from external entity)
         let storeIdToRecord = activeStoreId;
@@ -284,16 +377,31 @@ export default function Debts() {
         if (storeIdToRecord) {
           const baseDesc = `${debtType === 'collection' ? 'Cobro' : 'Abono'} a cuenta: ${isReceivable(debt) ? getDebtorName(debt) : getCreditorName(debt)}`;
           
-          await db.expenses.add({
-            storeId: storeIdToRecord,
-            date: new Date().toISOString(),
-            description: baseDesc,
-            amount: totalToPay,
-            type: 'debt_payment',
-            debtType: debtType,
-            paymentMethod: cash > 0 ? 'cash' : 'transfer',
-            debtId: debt.id
-          });
+          if (cash > 0) {
+            await db.expenses.add({
+              storeId: storeIdToRecord,
+              date: new Date().toISOString(),
+              description: `${baseDesc} (Efectivo)`,
+              amount: cash,
+              type: 'debt_payment',
+              debtType: debtType,
+              paymentMethod: 'cash',
+              debtId: debt.id
+            });
+          }
+          
+          if (transfer > 0) {
+            await db.expenses.add({
+              storeId: storeIdToRecord,
+              date: new Date().toISOString(),
+              description: `${baseDesc} (Transferencia)`,
+              amount: transfer,
+              type: 'debt_payment',
+              debtType: debtType,
+              paymentMethod: 'transfer',
+              debtId: debt.id
+            });
+          }
         }
       }
     });
@@ -420,6 +528,35 @@ export default function Debts() {
                   className="input-field"
                   rows={2}
                 />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-2 ml-1 text-indigo-600 dark:text-indigo-400">Método de Tesorería</label>
+                <div className="grid grid-cols-2 gap-4">
+                  <button
+                    type="button"
+                    onClick={() => setEditModal({ ...editModal, debt: { ...editModal.debt!, paymentMethod: 'cash' } })}
+                    className={cn(
+                      "px-4 py-2 rounded-xl text-xs font-bold transition-all border",
+                      editModal.debt.paymentMethod === 'cash' 
+                        ? "bg-indigo-600 border-indigo-600 text-white shadow-lg shadow-indigo-600/20" 
+                        : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:border-indigo-400"
+                    )}
+                  >
+                    Efectivo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditModal({ ...editModal, debt: { ...editModal.debt!, paymentMethod: 'transfer' } })}
+                    className={cn(
+                      "px-4 py-2 rounded-xl text-xs font-bold transition-all border",
+                      editModal.debt.paymentMethod === 'transfer' 
+                        ? "bg-indigo-600 border-indigo-600 text-white shadow-lg shadow-indigo-600/20" 
+                        : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:border-indigo-400"
+                    )}
+                  >
+                    Transferencia
+                  </button>
+                </div>
               </div>
               <div className="flex justify-end gap-3 pt-4">
                 <button
@@ -835,6 +972,52 @@ export default function Debts() {
                     rows={2}
                   />
                 </div>
+
+                <div className="space-y-4 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  <label className="flex items-center gap-3 text-sm font-bold text-slate-700 dark:text-slate-300 cursor-pointer group">
+                    <input
+                      type="checkbox"
+                      checked={manualDebt.affectTreasury}
+                      onChange={(e) => setManualDebt({...manualDebt, affectTreasury: e.target.checked})}
+                      className="w-4 h-4 rounded border-slate-300 dark:border-slate-700 text-indigo-600 focus:ring-indigo-500 bg-white dark:bg-slate-900"
+                    />
+                    <span className="group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
+                      {manualDebt.type === 'receivable' ? 'Descontar monto de Tesorería' : 'Sumar monto a Tesorería'}
+                    </span>
+                  </label>
+
+                  {manualDebt.affectTreasury && (
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-2 ml-1 text-indigo-600 dark:text-indigo-400">Método de Tesorería</label>
+                        <div className="grid grid-cols-2 gap-4">
+                          <button
+                            type="button"
+                            onClick={() => setManualDebt({...manualDebt, paymentMethod: 'cash'})}
+                            className={cn(
+                              "px-4 py-2 rounded-xl text-xs font-bold transition-all border",
+                              manualDebt.paymentMethod === 'cash' 
+                                ? "bg-indigo-600 border-indigo-600 text-white shadow-lg shadow-indigo-600/20" 
+                                : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:border-indigo-400"
+                            )}
+                          >
+                            Efectivo
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setManualDebt({...manualDebt, paymentMethod: 'transfer'})}
+                            className={cn(
+                              "px-4 py-2 rounded-xl text-xs font-bold transition-all border",
+                              manualDebt.paymentMethod === 'transfer' 
+                                ? "bg-indigo-600 border-indigo-600 text-white shadow-lg shadow-indigo-600/20" 
+                                : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:border-indigo-400"
+                            )}
+                          >
+                            Transferencia
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 <div className="flex justify-end gap-3 pt-4">
                   <button
                     type="button"

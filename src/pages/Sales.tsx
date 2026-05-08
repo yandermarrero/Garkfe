@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../lib/db';
-import { formatCurrency, cn, toLocalISO, fromLocalISO } from '../lib/utils';
-import { Trash2, CheckCircle, XCircle, Plus, ShoppingBag, UserPlus, PackagePlus, CreditCard, Wallet, ArrowRight, History, Store, ShoppingCart, Lock, Search } from 'lucide-react';
+import { formatCurrency, cn, toLocalISO, fromLocalISO, formatNumber } from '../lib/utils';
+import { Trash2, CheckCircle, XCircle, Plus, ShoppingBag, UserPlus, PackagePlus, CreditCard, Wallet, ArrowRight, History, Store, ShoppingCart, Lock, Search, AlertTriangle } from 'lucide-react';
 import { useStoreContext } from '../lib/StoreContext';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth } from '../lib/AuthContext';
@@ -44,10 +44,14 @@ export default function Sales() {
   const [cashierName, setCashierName] = useState('');
 
   const [cart, setCart] = useState<{ productId: number, quantity: number, price: number, costPrice: number }[]>([]);
+  const [shrinkageCart, setShrinkageCart] = useState<{ productId: number, quantity: number, price: number, costPrice: number }[]>([]);
   const [selectedProduct, setSelectedProduct] = useState('');
   const [selectedQuantity, setSelectedQuantity] = useState('1.00');
+  const [selectedShrinkageProduct, setSelectedShrinkageProduct] = useState('');
+  const [selectedShrinkageQuantity, setSelectedShrinkageQuantity] = useState('1.00');
   const [saleDate, setSaleDate] = useState(new Date().toISOString());
   const [productSearch, setProductSearch] = useState('');
+  const [shrinkageProductSearch, setShrinkageProductSearch] = useState('');
   
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
 
@@ -65,6 +69,7 @@ export default function Sales() {
           setTargetType(data.targetType || 'customer');
           setCustomerName(data.customerName || '');
           setCart(data.cart || []);
+          setShrinkageCart(data.shrinkageCart || []);
           setExtraExpense(data.extraExpense || '0');
           setExtraIncome(data.extraIncome || '0');
           setCashAmount(data.cashAmount || '0');
@@ -87,6 +92,7 @@ export default function Sales() {
       targetType,
       customerName,
       cart,
+      shrinkageCart,
       extraExpense,
       extraIncome,
       cashAmount,
@@ -96,7 +102,7 @@ export default function Sales() {
       creditClients
     };
     
-    if (cart.length > 0 || customerName || cashierName) {
+    if (cart.length > 0 || shrinkageCart.length > 0 || customerName || cashierName) {
       localStorage.setItem('pending_sale', JSON.stringify({
         data: saleData,
         timestamp: new Date().getTime()
@@ -104,7 +110,7 @@ export default function Sales() {
     } else {
       localStorage.removeItem('pending_sale');
     }
-  }, [type, targetType, customerName, cart, extraExpense, extraIncome, cashAmount, transferAmount, shrinkage, cashierName, creditClients]);
+  }, [type, targetType, customerName, cart, shrinkageCart, extraExpense, extraIncome, cashAmount, transferAmount, shrinkage, cashierName, creditClients]);
 
   useEffect(() => {
     if (activeStoreId) {
@@ -183,6 +189,28 @@ export default function Sales() {
   const handleRemoveFromCart = (pId: number) => {
     setCart(prev => prev.filter(item => item.productId !== pId));
   };
+  
+  const handleAddToShrinkageCart = () => {
+    if (!selectedShrinkageProduct || !selectedShrinkageQuantity) return;
+    const pId = parseInt(selectedShrinkageProduct);
+    const qty = parseFloat(selectedShrinkageQuantity);
+    const product = products?.find(p => p.id === pId);
+    if (!product) return;
+
+    setShrinkageCart(prev => {
+      const existing = prev.find(item => item.productId === pId);
+      if (existing) {
+        return prev.map(item => item.productId === pId ? { ...item, quantity: item.quantity + qty } : item);
+      }
+      return [...prev, { productId: pId, quantity: qty, price: product.price, costPrice: product.costPrice || 0 }];
+    });
+    setSelectedShrinkageProduct('');
+    setSelectedShrinkageQuantity('1.00');
+  };
+
+  const handleRemoveFromShrinkageCart = (pId: number) => {
+    setShrinkageCart(prev => prev.filter(item => item.productId !== pId));
+  };
 
   const handleAddCreditClient = () => {
     setCreditClients([...creditClients, { name: '', amount: '0' }]);
@@ -215,99 +243,104 @@ export default function Sales() {
     const dId = destStoreId ? parseInt(destStoreId) : undefined;
 
     try {
-      await db.transaction('rw', db.inventory, db.transactions, db.debts, db.expenses, async () => {
-        const transactionItems: { productId: number, quantity: number, price: number, costPrice: number }[] = [];
+      await db.transaction('rw', [db.inventory, db.transactions, db.debts, db.expenses, db.products], async () => {
+        const transactionItems: { productId: number, quantity: number, price: number, costPrice: number, type?: 'sale' | 'shrinkage' }[] = [];
 
-        // 1. Check and deduct inventory (FIFO)
+        // 1. Process Sale Cart (FIFO)
         for (const item of cart) {
           const batches = await db.inventory.where({ storeId: oId, productId: item.productId }).toArray();
-          
-          // Sort batches: oldest first
-          batches.sort((a, b) => {
-            const dateA = a.dateAdded ? new Date(a.dateAdded).getTime() : 0;
-            const dateB = b.dateAdded ? new Date(b.dateAdded).getTime() : 0;
-            return dateA - dateB;
-          });
+          batches.sort((a, b) => (a.dateAdded ? new Date(a.dateAdded).getTime() : 0) - (b.dateAdded ? new Date(b.dateAdded).getTime() : 0));
 
           const totalAvailable = batches.reduce((sum, b) => sum + b.quantity, 0);
           if (totalAvailable < item.quantity) {
-            const pName = products?.find(p => p.id === item.productId)?.name;
-            throw new Error(`Inventario insuficiente para el producto: ${pName}`);
+            throw new Error(`Inventario insuficiente para: ${products?.find(p => p.id === item.productId)?.name}`);
           }
 
-          let remainingToDeduct = item.quantity;
-          
+          let remaining = item.quantity;
           for (const batch of batches) {
-            if (remainingToDeduct <= 0) break;
-            
-            const deductAmount = Math.min(batch.quantity, remainingToDeduct);
-            
-            if (deductAmount > 0) {
-              // Deduct from origin
-              if (batch.quantity === deductAmount) {
-                await db.inventory.delete(batch.id!);
-              } else {
-                await db.inventory.update(batch.id!, { quantity: batch.quantity - deductAmount });
-              }
+            if (remaining <= 0) break;
+            const deduct = Math.min(batch.quantity, remaining);
+            if (deduct > 0) {
+              if (batch.quantity === deduct) await db.inventory.delete(batch.id!);
+              else await db.inventory.update(batch.id!, { quantity: batch.quantity - deduct });
 
-              const batchCostPrice = batch.costPrice !== undefined ? batch.costPrice : (products?.find(p => p.id === item.productId)?.costPrice || 0);
-
-              // 2. If target is another store, add to destination inventory
               if (targetType === 'store' && dId) {
                 const destBatches = await db.inventory.where({ storeId: dId, productId: item.productId }).toArray();
-                // The cost price for the destination store is the price they "bought" or "consigned" it for
-                const destCostPrice = item.price;
-                const destBatch = destBatches.find(b => b.costPrice === destCostPrice);
-                
-                if (destBatch) {
-                  await db.inventory.update(destBatch.id!, { quantity: destBatch.quantity + deductAmount });
-                } else {
-                  await db.inventory.add({ 
-                    storeId: dId, 
-                    productId: item.productId, 
-                    quantity: deductAmount,
-                    costPrice: destCostPrice,
-                    dateAdded: new Date().toISOString()
-                  });
-                }
+                const destBatch = destBatches.find(b => b.costPrice === item.price);
+                if (destBatch) await db.inventory.update(destBatch.id!, { quantity: destBatch.quantity + deduct });
+                else await db.inventory.add({ storeId: dId, productId: item.productId, quantity: deduct, costPrice: item.price, dateAdded: new Date().toISOString() });
               }
 
-              // Record transaction item for this batch
               transactionItems.push({
                 productId: item.productId,
-                quantity: deductAmount,
+                quantity: deduct,
                 price: item.price,
-                costPrice: batchCostPrice
+                costPrice: batch.costPrice || products?.find(p => p.id === item.productId)?.costPrice || 0,
+                type: 'sale'
               });
-
-              remainingToDeduct -= deductAmount;
+              remaining -= deduct;
             }
+          }
+        }
+
+        // 2. Process Shrinkage Cart (FIFO)
+        let calculatedShrinkageValue = 0;
+        for (const item of shrinkageCart) {
+          const batches = await db.inventory.where({ storeId: oId, productId: item.productId }).toArray();
+          batches.sort((a, b) => (a.dateAdded ? new Date(a.dateAdded).getTime() : 0) - (b.dateAdded ? new Date(b.dateAdded).getTime() : 0));
+
+          const totalAvailable = batches.reduce((sum, b) => sum + b.quantity, 0);
+          if (totalAvailable < item.quantity) {
+            throw new Error(`Inventario insuficiente para merma: ${products?.find(p => p.id === item.productId)?.name}`);
+          }
+
+          let remaining = item.quantity;
+          for (const batch of batches) {
+            if (remaining <= 0) break;
+            const deduct = Math.min(batch.quantity, remaining);
+            if (deduct > 0) {
+              if (batch.quantity === deduct) await db.inventory.delete(batch.id!);
+              else await db.inventory.update(batch.id!, { quantity: batch.quantity - deduct });
+
+              transactionItems.push({
+                productId: item.productId,
+                quantity: deduct,
+                price: item.price,
+                costPrice: batch.costPrice || products?.find(p => p.id === item.productId)?.costPrice || 0,
+                type: 'shrinkage'
+              });
+              calculatedShrinkageValue += ((batch.costPrice || products?.find(p => p.id === item.productId)?.costPrice || 0) * deduct);
+              remaining -= deduct;
+            }
+          }
+        }
+
+        // Auto-archive products that reached 0 stock
+        const allImpactedIds = Array.from(new Set([...cart.map(i => i.productId), ...shrinkageCart.map(i => i.productId)]));
+        for (const pId of allImpactedIds) {
+          const totalStockAfter = await db.inventory.where('productId').equals(pId).toArray();
+          if (totalStockAfter.reduce((sum, b) => sum + b.quantity, 0) <= 0) {
+            await db.products.update(pId, { archived: true });
           }
         }
 
         // 3. Create transaction
         const totalAmount = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-        
         const exp = parseFloat(extraExpense) || 0;
         const inc = parseFloat(extraIncome) || 0;
         const cred = totalCreditAmount;
         const cash = parseFloat(cashAmount) || 0;
         const trans = parseFloat(transferAmount) || 0;
-        const shrink = parseFloat(shrinkage) || 0;
+        const shrink = shrinkageCart.length > 0 ? calculatedShrinkageValue : (parseFloat(shrinkage) || 0);
 
-        let shortage = 0;
-        let surplus = 0;
-
+        let shortage = 0, surplus = 0;
         if (type === 'sale') {
-          const expectedTotal = totalAmount - shrink + inc - exp;
+          // Merma does not affect expected cash from sales.
+          const expectedTotal = totalAmount + inc - exp;
           const collectedTotal = cash + trans + cred;
           const difference = expectedTotal - collectedTotal;
-
-          if (difference > 0) {
-            shortage = difference;
-          } else if (difference < 0) {
-            surplus = Math.abs(difference);
-          }
+          if (difference > 0) shortage = difference;
+          else if (difference < 0) surplus = Math.abs(difference);
         }
 
         const txId = await db.transactions.add({
@@ -341,7 +374,7 @@ export default function Sales() {
             await db.expenses.add({ storeId: oId, date: new Date(saleDate).toISOString(), description: `Sobrante en caja (Venta #${txId})`, amount: surplus, type: 'income', paymentMethod: 'cash', transactionId: txId as number });
           }
           if (shrink > 0) {
-            await db.expenses.add({ storeId: oId, date: new Date(saleDate).toISOString(), description: `Merma/Rotura en venta #${txId}`, amount: shrink, type: 'expense', transactionId: txId as number });
+            await db.expenses.add({ storeId: oId, date: new Date(saleDate).toISOString(), description: `Merma/Rotura (Costo) en venta #${txId}`, amount: shrink, type: 'expense', transactionId: txId as number });
           }
           if (shortage > 0) {
             await db.debts.add({ creditorStoreId: oId, debtorName: cashierName.trim() || 'Cajero (Faltante)', transactionId: txId as number, amount: shortage, status: 'pending', date: new Date(saleDate).toISOString(), type: 'receivable' });
@@ -389,7 +422,9 @@ export default function Sales() {
   };
 
   const total = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-  const expectedTotal = total - (parseFloat(shrinkage) || 0) + (parseFloat(extraIncome) || 0) - (parseFloat(extraExpense) || 0);
+  const shrinkValue = shrinkageCart.reduce((sum, item) => sum + (item.price * item.quantity), 0) || (parseFloat(shrinkage) || 0);
+  // Merma does NOT reduce expected cash.
+  const expectedTotal = total + (parseFloat(extraIncome) || 0) - (parseFloat(extraExpense) || 0);
   const collectedTotal = (parseFloat(cashAmount) || 0) + (parseFloat(transferAmount) || 0) + totalCreditAmount;
   const getProductName = (id: number) => products?.find(p => p.id === id)?.name || 'Desconocido';
 
@@ -400,7 +435,8 @@ export default function Sales() {
       .filter(i => i.storeId === sId && i.productId === pId)
       .reduce((sum, b) => sum + b.quantity, 0);
     const cartItem = cart.find(item => item.productId === pId);
-    return stock - (cartItem?.quantity || 0);
+    const shrinkItem = shrinkageCart.find(item => item.productId === pId);
+    return stock - (cartItem?.quantity || 0) - (shrinkItem?.quantity || 0);
   };
 
   return (
@@ -607,7 +643,7 @@ export default function Sales() {
                         className="input-field pl-11"
                       >
                         <option value="">Seleccionar producto...</option>
-                        {products?.filter(p => {
+                        {products?.filter(p => !p.archived).filter(p => {
                           const matchesSearch = p.name.toLowerCase().includes(productSearch.toLowerCase());
                           if (!matchesSearch) return false;
                           
@@ -700,10 +736,74 @@ export default function Sales() {
                       </div>
                     </div>
                     <div>
-                      <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-2 ml-1">Merma / Rotura</label>
-                      <div className="relative">
-                        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500 font-bold text-sm">$</span>
-                        <input type="number" min="0" step="0.01" value={shrinkage} onChange={(e) => setShrinkage(e.target.value)} className="input-field pl-8" />
+                      <div className="flex justify-between items-center mb-2 ml-1">
+                        <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Merma / Rotura (Itemizado)</label>
+                      </div>
+                      <div className="space-y-4">
+                        <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end bg-slate-50/50 dark:bg-slate-800/50 p-4 rounded-xl border border-slate-100 dark:border-slate-800">
+                          <div className="md:col-span-5 space-y-1.5">
+                            <div className="relative">
+                              <input
+                                type="text"
+                                placeholder="Filtrar producto..."
+                                value={shrinkageProductSearch}
+                                onChange={(e) => setShrinkageProductSearch(e.target.value)}
+                                className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg pl-3 pr-2 py-1 text-[10px] focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-700 dark:text-slate-300 mb-1"
+                              />
+                              <select
+                                value={selectedShrinkageProduct}
+                                onChange={(e) => setSelectedShrinkageProduct(e.target.value)}
+                                className="input-field py-2 text-sm"
+                              >
+                                <option value="">Seleccionar...</option>
+                                {products?.filter(p => !p.archived).filter(p => p.name.toLowerCase().includes(shrinkageProductSearch.toLowerCase())).map(p => (
+                                  <option key={p.id} value={p.id}>{p.name}</option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+                          <div className="md:col-span-4 space-y-1.5">
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0.01"
+                              value={selectedShrinkageQuantity}
+                              onChange={(e) => setSelectedShrinkageQuantity(e.target.value)}
+                              className="input-field py-2 text-sm font-bold"
+                              placeholder="Cantidad"
+                            />
+                          </div>
+                          <div className="md:col-span-3">
+                            <button
+                              type="button"
+                              onClick={handleAddToShrinkageCart}
+                              className="btn-secondary w-full py-2.5 text-[10px] font-bold uppercase tracking-wider"
+                            >
+                              Agregar
+                            </button>
+                          </div>
+                        </div>
+
+                        {shrinkageCart.length > 0 && (
+                          <div className="space-y-2 max-h-40 overflow-y-auto pr-2 custom-scrollbar">
+                            {shrinkageCart.map((item, idx) => (
+                              <div key={idx} className="flex items-center justify-between bg-white dark:bg-slate-900 p-2 rounded-lg border border-slate-100 dark:border-slate-800 text-[11px] font-medium">
+                                <span className="text-slate-700 dark:text-slate-300 truncate flex-1">{getProductName(item.productId)}</span>
+                                <span className="text-slate-500 dark:text-slate-500 mx-2">{formatNumber(item.quantity)} u</span>
+                                <button type="button" onClick={() => handleRemoveFromShrinkageCart(item.productId)} className="p-1 text-slate-300 hover:text-rose-500">
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {shrinkageCart.length === 0 && (
+                          <div className="relative">
+                            <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500 font-bold text-sm">$</span>
+                            <input type="number" min="0" step="0.01" value={shrinkage} onChange={(e) => setShrinkage(e.target.value)} className="input-field pl-10 py-2.5 text-sm font-bold" placeholder="Valor de ajuste manual" />
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -798,13 +898,13 @@ export default function Sales() {
                   <div className="flex justify-between items-start mb-3">
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-bold text-slate-900 dark:text-slate-100 truncate leading-tight">{getProductName(item.productId)}</p>
-                      <p className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mt-1">{item.quantity.toFixed(2)} unidades × {formatCurrency(item.price)}</p>
+                      <p className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mt-1">{formatNumber(item.quantity)} unidades × {formatCurrency(item.price)}</p>
                       <p className={cn(
                         "text-[10px] font-bold uppercase tracking-wider mt-1.5 flex items-center gap-1",
                         getRemainingStock(item.productId) < 0 ? "text-rose-500 dark:text-rose-400" : "text-emerald-600 dark:text-emerald-400"
                       )}>
                         <span className="opacity-60">Quedarán:</span>
-                        <span>{getRemainingStock(item.productId).toFixed(2)} en stock</span>
+                        <span>{formatNumber(getRemainingStock(item.productId))} en stock</span>
                       </p>
                     </div>
                     <button type="button" onClick={() => handleRemoveFromCart(item.productId)} className={cn("p-2 text-slate-300 dark:text-slate-600 hover:text-rose-500 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/20 rounded-xl transition-all", !isGuest && "opacity-0 group-hover:opacity-100", isGuest && "hidden")}>
@@ -842,7 +942,7 @@ export default function Sales() {
             <div className="space-y-2">
               <div className="flex justify-between items-center text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
                 <span>Merma:</span>
-                <span className="text-rose-500 dark:text-rose-400">-{formatCurrency(parseFloat(shrinkage) || 0)}</span>
+                <span className="text-rose-500 dark:text-rose-400">-{formatCurrency(shrinkValue)}</span>
               </div>
               <div className="flex justify-between items-center text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
                 <span>Ingreso Extra:</span>

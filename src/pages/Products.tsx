@@ -18,6 +18,7 @@ export default function Products() {
   const [costPrice, setCostPrice] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
 
   const [isPriceModalOpen, setIsPriceModalOpen] = useState(false);
   const [selectedProductId, setSelectedProductId] = useState<number | null>(null);
@@ -131,6 +132,7 @@ export default function Products() {
   const selectedProduct = products?.find(p => p.id === selectedProductId);
 
   const filteredProducts = products?.filter(p => 
+    (showArchived ? true : !p.archived) &&
     p.name.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
@@ -213,15 +215,35 @@ export default function Products() {
       <div className="card overflow-hidden">
         <div className="p-6 border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/50 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <h3 className="text-base font-bold text-slate-800 dark:text-slate-100">Catálogo de Productos</h3>
-          <div className="relative w-full md:w-72">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-slate-500" />
-            <input
-              type="text"
-              placeholder="Buscar producto..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="input-field pl-10 py-2 text-sm"
-            />
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Ver Archivados</label>
+              <button
+                type="button"
+                onClick={() => setShowArchived(!showArchived)}
+                className={cn(
+                  "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none",
+                  showArchived ? "bg-indigo-600" : "bg-slate-200 dark:bg-slate-700"
+                )}
+              >
+                <span
+                  className={cn(
+                    "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                    showArchived ? "translate-x-6" : "translate-x-1"
+                  )}
+                />
+              </button>
+            </div>
+            <div className="relative w-full md:w-72">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-slate-500" />
+              <input
+                type="text"
+                placeholder="Buscar producto..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="input-field pl-10 py-2 text-sm"
+              />
+            </div>
           </div>
         </div>
         <div className="overflow-x-auto">

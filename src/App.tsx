@@ -80,7 +80,7 @@ export default function App() {
     <AuthProvider>
       <ThemeProvider>
         <StoreProvider>
-          <BrowserRouter>
+          <BrowserRouter basename="/Garkfe/">
             <AppRoutes />
           </BrowserRouter>
         </StoreProvider>

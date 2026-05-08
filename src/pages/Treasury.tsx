@@ -16,6 +16,34 @@ export default function Treasury() {
     end: new Date().toISOString().split('T')[0]
   });
 
+  const setQuickFilter = (type: 'today' | 'week' | 'month' | 'yeartodate' | 'last30') => {
+    const end = new Date();
+    let start = new Date();
+    
+    switch (type) {
+      case 'today':
+        start.setHours(0, 0, 0, 0);
+        break;
+      case 'week':
+        start.setDate(end.getDate() - 7);
+        break;
+      case 'month':
+        start.setDate(1); // First day of current month
+        break;
+      case 'yeartodate':
+        start.setMonth(0, 1); // First day of current year
+        break;
+      case 'last30':
+        start.setDate(end.getDate() - 30);
+        break;
+    }
+    
+    setDateRange({
+      start: start.toISOString().split('T')[0],
+      end: end.toISOString().split('T')[0]
+    });
+  };
+
   const [isEditingCapital, setIsEditingCapital] = useState(false);
   const [newCapitalCash, setNewCapitalCash] = useState('');
   const [newCapitalTransfer, setNewCapitalTransfer] = useState('');
@@ -97,23 +125,6 @@ export default function Treasury() {
             link: '/transactions'
           });
         }
-      }
-    });
-
-    // Add Purchases
-    purchases.filter(p => p.storeId === activeStoreId && p.paymentStatus === 'paid').forEach(p => {
-      const pDate = new Date(p.date);
-      if (pDate >= start && pDate <= end) {
-        items.push({
-          id: p.id!,
-          date: p.date,
-          type: 'Compra',
-          description: `Compra al contado #${p.id}`,
-          amount: p.totalAmount,
-          isIncome: false,
-          paymentMethod: p.paymentMethod || 'cash',
-          link: '/transactions'
-        });
       }
     });
 
@@ -287,10 +298,37 @@ export default function Treasury() {
       </div>
 
       <div className="bg-white dark:bg-[#161B22] rounded-xl shadow-sm border border-gray-100 dark:border-slate-800 overflow-hidden">
-        <div className="p-6 border-b border-gray-100 dark:border-slate-800 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div className="p-6 border-b border-gray-100 dark:border-slate-800 flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4">
           <h3 className="text-lg font-bold text-gray-800 dark:text-slate-100">Historial de Operaciones</h3>
           
-          <div className="flex items-center gap-4">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 w-full xl:w-auto">
+            <div className="flex flex-wrap items-center gap-2">
+              <button 
+                onClick={() => setQuickFilter('today')}
+                className="px-3 py-1.5 text-xs font-medium bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-300 hover:bg-gray-200 dark:hover:bg-slate-700 rounded-lg transition-colors"
+              >
+                Hoy
+              </button>
+              <button 
+                onClick={() => setQuickFilter('week')}
+                className="px-3 py-1.5 text-xs font-medium bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-300 hover:bg-gray-200 dark:hover:bg-slate-700 rounded-lg transition-colors"
+              >
+                7 días
+              </button>
+              <button 
+                onClick={() => setQuickFilter('month')}
+                className="px-3 py-1.5 text-xs font-medium bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-300 hover:bg-gray-200 dark:hover:bg-slate-700 rounded-lg transition-colors"
+              >
+                Mes
+              </button>
+              <button 
+                onClick={() => setQuickFilter('yeartodate')}
+                className="px-3 py-1.5 text-xs font-medium bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-300 hover:bg-gray-200 dark:hover:bg-slate-700 rounded-lg transition-colors"
+              >
+                Año
+              </button>
+            </div>
+
             <div className="flex items-center gap-2 bg-gray-50 dark:bg-slate-900 px-3 py-2 rounded-lg border border-gray-200 dark:border-slate-700">
               <Calendar className="w-4 h-4 text-gray-500 dark:text-slate-400" />
               <input

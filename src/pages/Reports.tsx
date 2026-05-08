@@ -40,6 +40,7 @@ export default function Reports() {
   const treasury = useLiveQuery(() => db.treasury.toArray());
   const suppliers = useLiveQuery(() => db.suppliers.toArray());
   const purchases = useLiveQuery(() => db.purchases.toArray());
+  const adjustments = useLiveQuery(() => db.inventoryAdjustments.toArray());
 
   const reportData = useMemo(() => {
     if (!transactions || !expenses || !stores) return null;
@@ -168,7 +169,13 @@ export default function Reports() {
       });
 
       filteredTxs.forEach(t => {
-        const pureSales = t.items.reduce((sum, item) => sum + item.price * item.quantity, 0) - (t.shrinkage || 0);
+        // Point 1: Internal consignments are not Revenue
+        if (t.type === 'consignment' && t.toStoreId) return;
+
+        // Point 2: Revenue only from 'sale' items. Merma is handled as an expense.
+        const saleItems = t.items.filter(i => i.type !== 'shrinkage');
+        const pureSales = saleItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+        
         if (t.type === 'sale' && storeStats[t.fromStoreId]) {
           storeStats[t.fromStoreId].directSales += pureSales;
         } else if (t.type === 'consignment' && storeStats[t.fromStoreId]) {
@@ -176,7 +183,7 @@ export default function Reports() {
         }
         
         if (storeStats[t.fromStoreId]) {
-          t.items.forEach(item => {
+          saleItems.forEach(item => {
             storeStats[t.fromStoreId].costOfGoods += (item.costPrice || 0) * item.quantity;
           });
         }
@@ -214,13 +221,19 @@ export default function Reports() {
       }
 
       filteredTxs.forEach(t => {
+        // Point 1: Internal consignments are not Revenue
+        if (t.type === 'consignment' && t.toStoreId) return;
+
         const dateStr = t.date.split('T')[0];
         if (dateStats[dateStr]) {
-          const pureSales = t.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+          // Point 2: Revenue only from 'sale' items
+          const saleItems = t.items.filter(i => i.type !== 'shrinkage');
+          const pureSales = saleItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+          
           if (t.type === 'sale') dateStats[dateStr].directSales += pureSales;
           else if (t.type === 'consignment') dateStats[dateStr].consignments += pureSales;
           
-          t.items.forEach(item => {
+          saleItems.forEach(item => {
             dateStats[dateStr].costOfGoods += (item.costPrice || 0) * item.quantity;
           });
         }
@@ -282,46 +295,99 @@ export default function Reports() {
   }, [transactions, expenses, stores, startDate, endDate, reportStoreId]);
 
   const balanceData = useMemo(() => {
-    if (!inventory || !debts || !treasury || !transactions || !expenses || !purchases) return null;
+    if (!inventory || !debts || !treasury || !transactions || !expenses || !purchases || !adjustments) return null;
     
-    // Calculate Inventory Value
+    const cutOffDate = endDate ? new Date(endDate + 'T23:59:59.999') : new Date();
+    const cutOffTime = cutOffDate.getTime();
+
+    // 1. Calculate Inventory Value at cut-off
+    // Start with current inventory
     let inventoryValue = 0;
-    inventory.forEach(item => {
-      if (reportStoreId === 'all' || item.storeId === parseInt(reportStoreId)) {
-        inventoryValue += (item.costPrice || 0) * item.quantity;
-      }
+    
+    // We'll calculate it by store
+    const storeIds = reportStoreId === 'all' ? stores?.map(s => s.id!) || [] : [parseInt(reportStoreId)];
+    
+    storeIds.forEach(sId => {
+      // Current inventory for this store
+      const currentStoreInventory = inventory.filter(i => i.storeId === sId);
+      
+      // We need to REVERT all movements that happened AFTER cutOffTime
+      // Movements that INCREASED stock must be SUBTRACTED
+      // Movements that DECREASED stock must be ADDED
+      
+      let storeValue = currentStoreInventory.reduce((sum, item) => sum + (item.costPrice || 0) * item.quantity, 0);
+      
+      // Purchases after cutOff (Increased stock -> subtract)
+      purchases.filter(p => p.storeId === sId && new Date(p.date).getTime() > cutOffTime).forEach(p => {
+        p.items.forEach(item => {
+          storeValue -= (item.costPrice || 0) * item.quantity;
+        });
+      });
+      
+      // Sales after cutOff (Decreased stock -> add back)
+      transactions.filter(t => t.fromStoreId === sId && new Date(t.date).getTime() > cutOffTime).forEach(t => {
+        t.items.forEach(item => {
+          storeValue += (item.costPrice || 0) * item.quantity;
+        });
+        // Also if it was an inter-store transfer, the destination store stock increased
+      });
+
+      // Inter-store transfers (Inbound to this store after cutOff)
+      transactions.filter(t => t.toStoreId === sId && new Date(t.date).getTime() > cutOffTime).forEach(t => {
+        t.items.forEach(item => {
+          storeValue -= (item.costPrice || 0) * item.quantity;
+        });
+      });
+
+      // Adjustments after cutOff
+      adjustments.filter(a => a.storeId === sId && new Date(a.date).getTime() > cutOffTime).forEach(a => {
+        if (a.type === 'add') {
+          storeValue -= (a.costPrice || 0) * a.quantity;
+        } else {
+          storeValue += (a.costPrice || 0) * a.quantity;
+        }
+      });
+      
+      inventoryValue += storeValue;
     });
 
-    // Calculate Accounts Receivable & Payable
+    // 2. Calculate Accounts Receivable & Payable at cut-off
     let accountsReceivable = 0;
     let accountsPayable = 0;
+    
     debts.forEach(d => {
-      if (d.status === 'pending') {
-        const remaining = d.amount - (d.paidAmount || 0);
-        if (d.type === 'receivable' || d.creditorStoreId) {
-          if (reportStoreId === 'all' || d.creditorStoreId === parseInt(reportStoreId)) {
-            accountsReceivable += remaining;
-          }
-        } else if (d.type === 'payable' || d.debtorStoreId) {
-          if (reportStoreId === 'all' || d.debtorStoreId === parseInt(reportStoreId)) {
-            accountsPayable += remaining;
-          }
+      const createdTime = new Date(d.date).getTime();
+      if (createdTime > cutOffTime) return; // Ignore if created after cut-off
+
+      // Find all payments for this debt made before or at cut-off
+      const debtPayments = expenses.filter(e => e.debtId === d.id && new Date(e.date).getTime() <= cutOffTime);
+      const paidAtThatTime = debtPayments.reduce((sum, e) => sum + e.amount, 0);
+      const remaining = d.amount - paidAtThatTime;
+
+      if (d.type === 'receivable' || d.creditorStoreId) {
+        if (reportStoreId === 'all' || d.creditorStoreId === parseInt(reportStoreId)) {
+          accountsReceivable += remaining;
+        }
+      } else if (d.type === 'payable' || d.debtorStoreId) {
+        if (reportStoreId === 'all' || d.debtorStoreId === parseInt(reportStoreId)) {
+          accountsPayable += remaining;
         }
       }
     });
 
-    // Calculate Cash (Treasury)
+    // 3. Calculate Cash (Treasury) at cut-off
     let cashCash = 0;
     let cashTransfer = 0;
     treasury.forEach(t => {
       if (reportStoreId === 'all' || t.storeId === parseInt(reportStoreId)) {
+        // Initial capital is usually the start of everything
         cashCash += (t.initialCapitalCash ?? t.initialCapital ?? 0);
         cashTransfer += (t.initialCapitalTransfer ?? 0);
       }
     });
 
-    // Add cash movements
-    transactions.forEach(t => {
+    // Incomes from sales/consignments up to cut-off
+    transactions.filter(t => new Date(t.date).getTime() <= cutOffTime).forEach(t => {
       if (reportStoreId === 'all' || t.fromStoreId === parseInt(reportStoreId)) {
         if (t.type === 'sale') {
           cashCash += (t.cashAmount || 0);
@@ -329,10 +395,11 @@ export default function Reports() {
         }
       }
     });
-    expenses.forEach(e => {
+
+    // Incomes/Expenses from expenses table up to cut-off
+    expenses.filter(e => new Date(e.date).getTime() <= cutOffTime).forEach(e => {
       if (reportStoreId === 'all' || e.storeId === parseInt(reportStoreId)) {
-        // Ignore expenses/incomes generated by sales as they are already accounted for in the cashAmount/transferAmount of the transaction
-        // However, for purchases, p.totalAmount only includes the items, so we MUST include extra expenses/incomes from purchases
+        // Ignore sales items (redundant)
         if (e.description.includes('en venta #') || e.description.includes('(Venta #')) {
           return;
         }
@@ -342,14 +409,6 @@ export default function Reports() {
         } else if (e.type === 'expense' || (e.type === 'debt_payment' && e.debtType === 'payment')) {
           if (e.paymentMethod === 'transfer') cashTransfer -= e.amount;
           else cashCash -= e.amount;
-        }
-      }
-    });
-    purchases.forEach(p => {
-      if (reportStoreId === 'all' || p.storeId === parseInt(reportStoreId)) {
-        if (p.paymentStatus === 'paid') {
-          if (p.paymentMethod === 'transfer') cashTransfer -= p.totalAmount;
-          else cashCash -= p.totalAmount;
         }
       }
     });
@@ -370,7 +429,7 @@ export default function Reports() {
       totalLiabilities,
       equity
     };
-  }, [inventory, debts, treasury, transactions, expenses, purchases, reportStoreId]);
+  }, [inventory, debts, treasury, transactions, expenses, purchases, adjustments, reportStoreId, endDate]);
 
   const debtsData = useMemo(() => {
     if (!debts || !suppliers) return { receivables: [], payables: [] };
@@ -645,7 +704,9 @@ export default function Reports() {
       {activeTab === 'balance' && balanceData && (
         <div className="bg-white dark:bg-[#161B22] p-8 rounded-xl shadow-sm border border-gray-100 dark:border-slate-800 max-w-4xl mx-auto">
           <h3 className="text-2xl font-bold text-center mb-6 text-slate-900 dark:text-slate-100">Balance General</h3>
-          <p className="text-center text-gray-500 dark:text-slate-400 mb-8">Al {new Date().toLocaleDateString()}</p>
+          <p className="text-center text-gray-500 dark:text-slate-400 mb-8">
+            Al {endDate ? new Date(endDate + 'T23:59:59').toLocaleDateString() : new Date().toLocaleDateString()}
+          </p>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
             {/* Activos */}

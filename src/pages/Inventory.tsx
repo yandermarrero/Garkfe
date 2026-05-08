@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../lib/db';
 import { useStoreContext } from '../lib/StoreContext';
-import { formatCurrency, cn } from '../lib/utils';
+import { formatCurrency, formatNumber, cn } from '../lib/utils';
 import { Package, TrendingUp, Plus, History, Lock, Trash2, X, Save, Edit2, Search, Store, AlertTriangle, Eye, ArrowRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth } from '../lib/AuthContext';
@@ -21,7 +21,7 @@ export default function Inventory() {
   const [productId, setProductId] = useState('');
   const [quantity, setQuantity] = useState('');
   const [costPrice, setCostPrice] = useState('');
-  const [adjustmentType, setAdjustmentType] = useState<'add' | 'remove'>('add');
+  const [adjustmentType, setAdjustmentType] = useState<'add' | 'remove' | 'initial'>('add');
 
   const [isNewProductModalOpen, setIsNewProductModalOpen] = useState(false);
   const [newProductName, setNewProductName] = useState('');
@@ -135,6 +135,8 @@ export default function Inventory() {
     }
   };
 
+  const [showInitialConfirm, setShowInitialConfirm] = useState(false);
+
   useEffect(() => {
     if (activeStoreId) {
       setStoreId(activeStoreId.toString());
@@ -156,19 +158,25 @@ export default function Inventory() {
 
   const handleAdjustment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!storeId || !productId || !quantity || (adjustmentType === 'add' && !costPrice)) return;
+    if (!storeId || !productId || !quantity || ((adjustmentType === 'add' || adjustmentType === 'initial') && !costPrice)) {
+      console.log('Missing fields:', { storeId, productId, quantity, costPrice, adjustmentType });
+      return;
+    }
 
     const sId = parseInt(storeId);
     const pId = parseInt(productId);
     const qty = parseFloat(quantity);
     const cost = parseFloat(costPrice || '0');
 
-    if (adjustmentType === 'add') {
-      const existingBatches = await db.inventory.where({ storeId: sId, productId: pId }).toArray();
-      const existing = existingBatches.find(b => b.costPrice === cost);
-      if (existing) {
-        await db.inventory.update(existing.id!, { quantity: existing.quantity + qty });
-      } else {
+    if (adjustmentType === 'add' || adjustmentType === 'initial') {
+      if (adjustmentType === 'initial') {
+        if (!showInitialConfirm) {
+          setShowInitialConfirm(true);
+          return;
+        }
+        
+        setShowInitialConfirm(false);
+        await db.inventory.where({ storeId: sId, productId: pId }).delete();
         await db.inventory.add({ 
           storeId: sId, 
           productId: pId, 
@@ -176,17 +184,35 @@ export default function Inventory() {
           costPrice: cost,
           dateAdded: new Date().toISOString()
         });
+      } else {
+        const existingBatches = await db.inventory.where({ storeId: sId, productId: pId }).toArray();
+        const existing = existingBatches.find(b => b.costPrice === cost);
+        if (existing) {
+          await db.inventory.update(existing.id!, { quantity: existing.quantity + qty });
+        } else {
+          await db.inventory.add({ 
+            storeId: sId, 
+            productId: pId, 
+            quantity: qty,
+            costPrice: cost,
+            dateAdded: new Date().toISOString()
+          });
+        }
       }
+      
       // Record adjustment
       await db.inventoryAdjustments.add({
         storeId: sId,
         productId: pId,
-        quantity: qty,
+        quantity: adjustmentType === 'initial' ? qty : qty, // Positive always for these types
         type: 'add',
         date: new Date().toISOString(),
         costPrice: cost,
-        reason: 'Ajuste manual (Entrada)'
+        reason: adjustmentType === 'initial' ? 'Inventario Inicial' : 'Ajuste manual (Entrada)'
       });
+
+      // Unarchive if was archived
+      await db.products.update(pId, { archived: false });
     } else {
       // FIFO Removal: Deduct from the oldest batches first
       const batches = await db.inventory
@@ -229,6 +255,13 @@ export default function Inventory() {
         date: new Date().toISOString(),
         reason: 'Ajuste manual (Salida)'
       });
+
+      // Auto-archive if total stock is 0 across all stores
+      const totalStockAfter = await db.inventory.where('productId').equals(pId).toArray();
+      const totalQty = totalStockAfter.reduce((sum, b) => sum + b.quantity, 0);
+      if (totalQty <= 0) {
+        await db.products.update(pId, { archived: true });
+      }
     }
 
     setQuantity('');
@@ -434,9 +467,10 @@ export default function Inventory() {
               <label className="block text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-2 ml-1">Tipo Ajuste</label>
               <select
                 value={adjustmentType}
-                onChange={(e) => setAdjustmentType(e.target.value as 'add' | 'remove')}
+                onChange={(e) => setAdjustmentType(e.target.value as 'add' | 'remove' | 'initial')}
                 className="input-field"
               >
+                <option value="initial">Inventario Inicial</option>
                 <option value="add">Entrada (+)</option>
                 <option value="remove">Salida (-)</option>
               </select>
@@ -476,15 +510,9 @@ export default function Inventory() {
                   className="input-field flex-1"
                 >
                   <option value="">Seleccionar...</option>
-                  {products?.filter(p => {
+                  {products?.filter(p => !p.archived || adjustmentType === 'initial' || adjustmentType === 'add').filter(p => {
                     const matchesSearch = p.name.toLowerCase().includes(productSearch.toLowerCase());
-                    if (!matchesSearch) return false;
-                    
-                    const sId = parseInt(storeId);
-                    if (!sId) return true;
-
-                    // Solo mostrar productos que ya tienen existencia en este punto de venta
-                    return inventory?.some(i => i.storeId === sId && i.productId === p.id && i.quantity > 0);
+                    return matchesSearch;
                   }).map(p => {
                     const sId = parseInt(storeId);
                     const stock = inventory?.filter(i => i.storeId === sId && i.productId === p.id).reduce((sum, b) => sum + b.quantity, 0) || 0;
@@ -509,7 +537,7 @@ export default function Inventory() {
                   type="number"
                   step="0.01"
                   min="0"
-                  required={adjustmentType === 'add'}
+                  required={adjustmentType === 'add' || adjustmentType === 'initial'}
                   value={costPrice}
                   onChange={(e) => setCostPrice(e.target.value)}
                   className="input-field pl-8"
@@ -531,14 +559,30 @@ export default function Inventory() {
             <div className="md:col-span-2">
               <button 
                 type="submit" 
+                disabled={!storeId || !productId || !quantity || ((adjustmentType === 'add' || adjustmentType === 'initial') && !costPrice)}
                 className={cn(
-                  "btn-primary w-full flex items-center justify-center gap-2 p-3",
-                  adjustmentType === 'remove' ? "bg-rose-600 hover:bg-rose-700 dark:bg-rose-600 dark:hover:bg-rose-700 dark:text-white" : ""
+                  "w-full flex items-center justify-center gap-2 p-3 rounded-2xl font-semibold text-sm transition-all active:scale-[0.98] shadow-lg disabled:opacity-50 disabled:cursor-not-allowed",
+                  adjustmentType === 'remove' ? "bg-rose-600 hover:bg-rose-700 text-white shadow-rose-900/10" : 
+                  adjustmentType === 'initial' ? (showInitialConfirm ? "bg-amber-500 hover:bg-amber-600 text-white shadow-amber-900/10" : "bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-900/10") : 
+                  "bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-white shadow-slate-900/10"
                 )}
               >
-                {adjustmentType === 'add' ? <Plus className="w-5 h-5" /> : <History className="w-5 h-5" />}
-                <span>{adjustmentType === 'add' ? 'Agregar' : 'Quitar'}</span>
+                {adjustmentType === 'add' ? <Plus className="w-5 h-5" /> : (adjustmentType === 'initial' ? (showInitialConfirm ? <AlertTriangle className="w-5 h-5" /> : <Package className="w-5 h-5" />) : <X className="w-5 h-5" />)}
+                <span>
+                  {adjustmentType === 'initial' 
+                    ? (showInitialConfirm ? '¡CONFIRMAR FIJAR INICIAL!' : 'Fijar Inicial') 
+                    : (adjustmentType === 'add' ? 'Agregar Stock' : 'Quitar Stock')}
+                </span>
               </button>
+              {showInitialConfirm && (
+                <button 
+                  type="button"
+                  onClick={() => setShowInitialConfirm(false)}
+                  className="w-full mt-2 text-[10px] font-bold text-slate-400 hover:text-slate-600 uppercase transition-colors"
+                >
+                  Cancelar Confirmación
+                </button>
+              )}
             </div>
           </form>
         </div>
@@ -607,7 +651,7 @@ export default function Inventory() {
                           "inline-flex items-center px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-tight",
                           item.quantity > 10 ? "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/30" : "bg-rose-50 dark:bg-rose-900/20 text-rose-700 dark:text-rose-400 border border-rose-100 dark:border-rose-900/30"
                         )}>
-                          {item.quantity.toFixed(2)}
+                          {formatNumber(item.quantity)}
                         </span>
                       </td>
                       <td className="px-6 py-4 text-sm text-slate-900 dark:text-slate-100 text-right font-bold">
@@ -918,10 +962,10 @@ export default function Inventory() {
                               "px-4 py-4 text-sm text-right font-bold",
                               item.quantity > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"
                             )}>
-                              {item.quantity > 0 ? '+' : ''}{item.quantity.toFixed(2)}
+                              {item.quantity > 0 ? '+' : ''}{formatNumber(item.quantity)}
                             </td>
                             <td className="px-4 py-4 text-sm text-right font-bold text-slate-900 dark:text-slate-100">
-                              {item.balanceAfter.toFixed(2)}
+                              {formatNumber(item.balanceAfter)}
                             </td>
                             <td className="px-4 py-4 text-sm">
                               <div className="flex items-center gap-2">

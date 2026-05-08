@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../lib/db';
-import { formatCurrency, cn, toLocalISO, fromLocalISO } from '../lib/utils';
+import { formatCurrency, formatNumber, cn, toLocalISO, fromLocalISO } from '../lib/utils';
 import { Trash2, CheckCircle, XCircle, Plus, Lock, Search } from 'lucide-react';
 import { useStoreContext } from '../lib/StoreContext';
 import { useAuth } from '../lib/AuthContext';
@@ -156,8 +156,8 @@ export default function Purchases() {
             });
           }
           
-          // Update product cost price (latest)
-          await db.products.update(item.productId, { costPrice: item.costPrice });
+          // Update product cost price (latest) and unarchive
+          await db.products.update(item.productId, { costPrice: item.costPrice, archived: false });
         }
 
         // 2. Create purchase record
@@ -165,20 +165,36 @@ export default function Purchases() {
         const exp = parseFloat(extraExpense) || 0;
         const inc = parseFloat(extraIncome) || 0;
 
+        // CRITICAL FIX: If it's consignment, it's ALWAYS credit/debt-based
+        const finalPaymentStatus = type === 'consignment' ? 'credit' : paymentStatus;
+
         const purchaseId = await db.purchases.add({
           storeId: dId,
           supplierId: sId,
           date: new Date(purchaseDate).toISOString(),
           totalAmount,
           items: cart,
-          paymentStatus,
-          paymentMethod: paymentStatus === 'paid' ? paymentMethod : undefined,
+          paymentStatus: finalPaymentStatus,
+          paymentMethod: finalPaymentStatus === 'paid' ? paymentMethod : undefined,
           extraExpense: exp,
           extraExpenseAccount: exp > 0 ? extraExpenseAccount : undefined,
           extraIncome: inc,
           extraIncomeAccount: inc > 0 ? extraIncomeAccount : undefined,
           type
         });
+
+        // Record main purchase expense ONLY if paid now
+        if (finalPaymentStatus === 'paid') {
+          await db.expenses.add({ 
+            storeId: dId, 
+            date: new Date(purchaseDate).toISOString(), 
+            description: `Pago de compra al contado #${purchaseId}`, 
+            amount: totalAmount, 
+            type: 'expense', 
+            paymentMethod: paymentMethod, 
+            purchaseId: purchaseId as number 
+          });
+        }
 
         if (exp > 0) {
           await db.expenses.add({ storeId: dId, date: new Date(purchaseDate).toISOString(), description: `Gasto extra en compra #${purchaseId}`, amount: exp, type: 'expense', paymentMethod: extraExpenseAccount, purchaseId: purchaseId as number });
@@ -188,7 +204,7 @@ export default function Purchases() {
         }
 
         // 3. Create debt if on credit or consignment
-        if (paymentStatus === 'credit' || type === 'consignment') {
+        if (finalPaymentStatus === 'credit' || type === 'consignment') {
           await db.debts.add({
             debtorStoreId: dId,
             supplierId: sId,
@@ -458,7 +474,7 @@ export default function Purchases() {
                         className="w-full border border-gray-300 dark:border-slate-700 rounded-md px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
                       >
                         <option value="">Seleccionar producto...</option>
-                        {products?.filter(p => p.name.toLowerCase().includes(productSearch.toLowerCase())).map(p => (
+                        {products?.filter(p => !p.archived).filter(p => p.name.toLowerCase().includes(productSearch.toLowerCase())).map(p => (
                           <option key={p.id} value={p.id}>{p.name}</option>
                         ))}
                       </select>
@@ -556,7 +572,7 @@ export default function Purchases() {
                 <li key={idx} className="flex justify-between items-center bg-gray-50 dark:bg-slate-800/50 p-3 rounded-lg border border-gray-100 dark:border-slate-800">
                   <div>
                     <p className="font-medium text-gray-900 dark:text-slate-100">{getProductName(item.productId)}</p>
-                    <p className="text-sm text-gray-500 dark:text-slate-500">{item.quantity.toFixed(2)} x {formatCurrency(item.costPrice)}</p>
+                    <p className="text-sm text-gray-500 dark:text-slate-500">{formatNumber(item.quantity)} x {formatCurrency(item.costPrice)}</p>
                   </div>
                   <div className="flex items-center gap-4">
                     <p className="font-medium text-gray-900 dark:text-slate-100">{formatCurrency(item.costPrice * item.quantity)}</p>
