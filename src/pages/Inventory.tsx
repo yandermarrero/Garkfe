@@ -516,7 +516,7 @@ export default function Inventory() {
                   }).map(p => {
                     const sId = parseInt(storeId);
                     const stock = inventory?.filter(i => i.storeId === sId && i.productId === p.id).reduce((sum, b) => sum + b.quantity, 0) || 0;
-                    return <option key={p.id} value={p.id}>{p.name} (Stock: {stock})</option>;
+                    return <option key={p.id} value={p.id}>{p.name} (Stock: {formatNumber(stock)})</option>;
                   })}
                 </select>
                 <button
@@ -550,7 +550,7 @@ export default function Inventory() {
                 type="number"
                 step="0.01"
                 required
-                placeholder="0.00"
+                placeholder="0,00"
                 value={quantity}
                 onChange={(e) => setQuantity(e.target.value)}
                 className="input-field"
@@ -770,7 +770,7 @@ export default function Inventory() {
                       <input
                         type="number"
                         step="0.01"
-                        placeholder="0.00"
+                        placeholder="0,00"
                         value={editSellingPrice}
                         onChange={(e) => setEditSellingPrice(e.target.value)}
                         className="input-field pl-8"
@@ -843,7 +843,7 @@ export default function Inventory() {
                         type="number"
                         step="0.01"
                         required
-                        placeholder="0.00"
+                        placeholder="0,00"
                         value={newProductCostPrice}
                         onChange={(e) => setNewProductCostPrice(e.target.value)}
                         className="input-field pl-8"
@@ -857,7 +857,7 @@ export default function Inventory() {
                       <input
                         type="number"
                         step="0.01"
-                        placeholder="0.00"
+                        placeholder="0,00"
                         value={newProductPrice}
                         onChange={(e) => setNewProductPrice(e.target.value)}
                         className="input-field pl-8"

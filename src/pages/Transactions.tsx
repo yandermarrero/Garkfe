@@ -34,6 +34,19 @@ export default function Transactions() {
   const [newCostPrice, setNewCostPrice] = useState<string>('');
   const [searchTerm, setSearchTerm] = useState('');
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+  const [searchParams] = React.useMemo(() => [new URLSearchParams(window.location.search)], []);
+
+  React.useEffect(() => {
+    const searchId = searchParams.get('id');
+    const type = searchParams.get('type');
+    if (searchId) {
+      if (type === 'purchase') {
+        setSearchTerm(`pur-${searchId}`);
+      } else {
+        setSearchTerm(`tx-${searchId}`);
+      }
+    }
+  }, [searchParams]);
 
   const getStoreName = (id?: number) => stores?.find(s => s.id === id)?.name || 'N/A';
   const getProductName = (id: number) => products?.find(p => p.id === id)?.name || 'Desconocido';
@@ -96,7 +109,11 @@ export default function Transactions() {
     if (searchTerm) {
       const search = searchTerm.toLowerCase();
       ops = ops.filter(op => 
-        op.items.some((item: any) => getProductName(item.productId).toLowerCase().includes(search))
+        op.id.toLowerCase().includes(search) || 
+        op.items.some((item: any) => getProductName(item.productId).toLowerCase().includes(search)) ||
+        (op.customerName && op.customerName.toLowerCase().includes(search)) ||
+        (op.origin && op.origin.toLowerCase().includes(search)) ||
+        (op.destination && op.destination.toLowerCase().includes(search))
       );
     }
 

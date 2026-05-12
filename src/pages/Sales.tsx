@@ -659,7 +659,7 @@ export default function Sales() {
                           const stock = invBatches.reduce((sum, b) => sum + b.quantity, 0);
                           const storePrice = storePrices?.find(sp => sp.productId === p.id && sp.storeId === sId);
                           const displayPrice = storePrice ? storePrice.price : p.price;
-                          return <option key={p.id} value={p.id}>{p.name} (Stock: {stock}) - {formatCurrency(displayPrice)}</option>;
+                          return <option key={p.id} value={p.id}>{p.name} (Stock: {formatNumber(stock)}) - {formatCurrency(displayPrice)}</option>;
                         })}
                       </select>
                     </div>

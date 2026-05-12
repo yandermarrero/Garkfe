@@ -175,7 +175,7 @@ export default function Products() {
                   type="number"
                   step="0.01"
                   required
-                  placeholder="0.00"
+                  placeholder="0,00"
                   value={costPrice}
                   onChange={(e) => setCostPrice(e.target.value)}
                   className="input-field pl-8"
@@ -189,7 +189,7 @@ export default function Products() {
                 <input
                   type="number"
                   step="0.01"
-                  placeholder="0.00"
+                  placeholder="0,00"
                   value={price}
                   onChange={(e) => setPrice(e.target.value)}
                   className="input-field pl-8"

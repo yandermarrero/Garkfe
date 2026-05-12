@@ -27,6 +27,14 @@ export default function Expenses() {
   const [filterType, setFilterType] = useState<'all' | 'expense' | 'income'>('all');
   const [filterSource, setFilterSource] = useState<'all' | 'manual' | 'transaction'>('all');
   const [filterName, setFilterName] = useState('');
+  const [searchParams] = React.useMemo(() => [new URLSearchParams(window.location.search)], []);
+
+  useEffect(() => {
+    const searchId = searchParams.get('id');
+    if (searchId) {
+      setFilterName(searchId);
+    }
+  }, [searchParams]);
 
   const [editingExpense, setEditingExpense] = useState<any | null>(null);
   const [deleteModal, setDeleteModal] = useState<{ isOpen: boolean, id?: number }>({ isOpen: false });
@@ -101,7 +109,11 @@ export default function Expenses() {
     if (filterSource === 'manual' && isTransaction) return false;
     if (filterSource === 'transaction' && !isTransaction) return false;
     
-    if (filterName && !e.description.toLowerCase().includes(filterName.toLowerCase())) return false;
+    if (filterName) {
+      const search = filterName.toLowerCase();
+      const idStr = e.id?.toString() || '';
+      if (!e.description.toLowerCase().includes(search) && !idStr.includes(search)) return false;
+    }
     
     return true;
   });

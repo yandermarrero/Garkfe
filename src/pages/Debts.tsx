@@ -23,6 +23,18 @@ export default function Debts() {
   const [transferAmount, setTransferAmount] = useState<string>('');
   
   const [filterType, setFilterType] = useState<'all' | 'receivable' | 'payable'>('all');
+  const [showSettled, setShowSettled] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searchParams] = React.useMemo(() => [new URLSearchParams(window.location.search)], []);
+
+  React.useEffect(() => {
+    const searchId = searchParams.get('id');
+    if (searchId) {
+      setSearchTerm(searchId);
+      setShowSettled(true);
+    }
+  }, [searchParams]);
+
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
   const [manualDebt, setManualDebt] = useState({
     type: 'receivable' as 'receivable' | 'payable',
@@ -273,7 +285,6 @@ export default function Debts() {
     setDeleteModal({ isOpen: false });
   };
 
-  const [filterEntity, setFilterEntity] = useState<string>('');
   const [startDate, setStartDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [endDate, setEndDate] = useState(() => new Date().toISOString().split('T')[0]);
 
@@ -440,6 +451,7 @@ export default function Debts() {
   };
 
   const filteredDebts = debts?.filter(debt => {
+    if (!showSettled && debt.status === 'paid') return false;
     if (filterType === 'receivable' && !isReceivable(debt)) return false;
     if (filterType === 'payable' && !isPayable(debt)) return false;
 
@@ -452,11 +464,12 @@ export default function Debts() {
       if (new Date(debt.date) > end) return false;
     }
 
-    if (filterEntity) {
-      const search = filterEntity.toLowerCase();
+    if (searchTerm) {
+      const search = searchTerm.toLowerCase();
       const creditor = getCreditorName(debt).toLowerCase();
       const debtor = getDebtorName(debt).toLowerCase();
-      if (!creditor.includes(search) && !debtor.includes(search)) {
+      const debtId = debt.id?.toString() || '';
+      if (!creditor.includes(search) && !debtor.includes(search) && !debtId.includes(search)) {
         return false;
       }
     }
@@ -672,7 +685,7 @@ export default function Debts() {
                       value={cashAmount}
                       onChange={(e) => setCashAmount(e.target.value)}
                       className="input-field pl-8"
-                      placeholder="0.00"
+                      placeholder="0,00"
                     />
                   </div>
                 </div>
@@ -689,7 +702,7 @@ export default function Debts() {
                       value={transferAmount}
                       onChange={(e) => setTransferAmount(e.target.value)}
                       className="input-field pl-8"
-                      placeholder="0.00"
+                      placeholder="0,00"
                     />
                   </div>
                 </div>
@@ -950,7 +963,7 @@ export default function Debts() {
                     value={manualDebt.amount}
                     onChange={(e) => setManualDebt({...manualDebt, amount: e.target.value})}
                     className="input-field"
-                    placeholder="0.00"
+                    placeholder="0,00"
                   />
                 </div>
                 <div>
@@ -1057,6 +1070,22 @@ export default function Debts() {
               <option value="receivable">Por Cobrar</option>
               <option value="payable">Por Pagar</option>
             </select>
+
+            <button
+              onClick={() => setShowSettled(!showSettled)}
+              className={cn(
+                "flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all border",
+                showSettled 
+                  ? "bg-emerald-600 border-emerald-600 text-white shadow-lg shadow-emerald-600/20" 
+                  : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:border-emerald-400"
+              )}
+            >
+              {showSettled ? (
+                <>Ver Pendientes <CheckCircle2 className="w-4 h-4" /></>
+              ) : (
+                <>Ver Saldadas <History className="w-4 h-4" /></>
+              )}
+            </button>
             
             <div className="relative flex-1 sm:flex-none">
               <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
@@ -1065,8 +1094,8 @@ export default function Debts() {
               <input
                 type="text"
                 placeholder="Buscar cliente o proveedor..."
-                value={filterEntity}
-                onChange={(e) => setFilterEntity(e.target.value)}
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
                 className="input-field pl-11 w-full sm:w-64"
               />
             </div>

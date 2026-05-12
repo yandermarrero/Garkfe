@@ -12,6 +12,7 @@ export default function Purchases() {
   const { activeStoreId } = useStoreContext();
   const stores = useLiveQuery(() => db.stores.toArray());
   const products = useLiveQuery(() => db.products.toArray());
+  const storePrices = useLiveQuery(() => db.storePrices.toArray());
   const suppliers = useLiveQuery(() => db.suppliers.toArray());
 
   const [destStoreId, setDestStoreId] = useState<string>(activeStoreId.toString());
@@ -114,13 +115,25 @@ export default function Purchases() {
     if (isNaN(price) || price < 0 || isNaN(cost) || cost < 0) return;
 
     try {
-      const id = await db.products.add({
-        name: newProductName.trim(),
-        price: price,
-        costPrice: cost
+      await db.transaction('rw', [db.products, db.storePrices], async () => {
+        const id = await db.products.add({
+          name: newProductName.trim(),
+          price: price,
+          costPrice: cost
+        });
+
+        if (destStoreId) {
+          await db.storePrices.add({
+            storeId: parseInt(destStoreId),
+            productId: id as number,
+            price: price
+          });
+        }
+        
+        setSelectedProduct(id.toString());
+        setSelectedCostPrice(cost.toString());
       });
-      setSelectedProduct(id.toString());
-      setSelectedCostPrice(cost.toString());
+      
       setIsProductModalOpen(false);
       setNewProductName('');
       setNewProductPrice('');
@@ -317,7 +330,7 @@ export default function Purchases() {
                     value={newProductPrice}
                     onChange={(e) => setNewProductPrice(e.target.value)}
                     className="w-full border border-gray-300 dark:border-slate-700 rounded-md px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
-                    placeholder="0.00"
+                    placeholder="0,00"
                   />
                 </div>
                 <div>
@@ -329,7 +342,7 @@ export default function Purchases() {
                     value={newProductCost}
                     onChange={(e) => setNewProductCost(e.target.value)}
                     className="w-full border border-gray-300 dark:border-slate-700 rounded-md px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
-                    placeholder="0.00"
+                    placeholder="0,00"
                   />
                 </div>
               </div>
@@ -474,7 +487,14 @@ export default function Purchases() {
                         className="w-full border border-gray-300 dark:border-slate-700 rounded-md px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
                       >
                         <option value="">Seleccionar producto...</option>
-                        {products?.filter(p => !p.archived).filter(p => p.name.toLowerCase().includes(productSearch.toLowerCase())).map(p => (
+                        {products?.filter(p => !p.archived)
+                          .filter(p => {
+                            if (!destStoreId) return false;
+                            const sId = parseInt(destStoreId);
+                            return storePrices?.some(sp => sp.storeId === sId && sp.productId === p.id);
+                          })
+                          .filter(p => p.name.toLowerCase().includes(productSearch.toLowerCase()))
+                          .map(p => (
                           <option key={p.id} value={p.id}>{p.name}</option>
                         ))}
                       </select>

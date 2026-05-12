@@ -6,7 +6,7 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function formatCurrency(amount: number) {
-  return new Intl.NumberFormat('es-US', { 
+  return new Intl.NumberFormat('es-AR', { 
     style: 'currency', 
     currency: 'USD',
     minimumFractionDigits: 2,
@@ -16,10 +16,10 @@ export function formatCurrency(amount: number) {
 
 export function formatNumber(amount: number | string) {
   const n = typeof amount === 'string' ? parseFloat(amount) : amount;
-  if (isNaN(n)) return '0.00';
+  if (isNaN(n)) return '0,00';
   // Use a more robust rounding for financial numbers
   const rounded = Math.round((n + Number.EPSILON) * 100) / 100;
-  return rounded.toLocaleString('en-US', {
+  return rounded.toLocaleString('es-AR', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   });

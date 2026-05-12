@@ -61,13 +61,20 @@ export default function Reports() {
       const inStore = reportStoreId === 'all' || e.storeId === parseInt(reportStoreId);
       
       // We exclude debt payments (abonos/cobros) from the P&L as they are balance sheet movements
-      // We use the debtId property or the new 'debt_payment' type for reliable filtering
       const isDebtPayment = e.type === 'debt_payment' || !!e.debtId || 
                            e.description.startsWith('Abono a cuenta:') || 
                            e.description.startsWith('Pago a cuenta (Inter-sucursal):') ||
                            e.description.startsWith('Cobro a cuenta (Inter-sucursal):');
       
-      return inDateRange && inStore && !isDebtPayment;
+      // We exclude inventory purchases from P&L expenses as inventory is an asset
+      const isPurchase = !!e.purchaseId || 
+                         e.description.toLowerCase().includes('compra') || 
+                         e.description.toLowerCase().includes('mercancia') ||
+                         e.description.toLowerCase().includes('mercancía') ||
+                         e.description.toLowerCase().includes('suministros') ||
+                         e.description.toLowerCase().includes('insumos');
+      
+      return inDateRange && inStore && !isDebtPayment && !isPurchase;
     });
 
     let totalDirectSales = 0;
@@ -135,8 +142,17 @@ export default function Reports() {
       } else {
         // Distinguish between operating expenses and transaction-related ones
         const isTransactionRelated = e.description.includes('en venta #') || 
-                                    e.description.includes('en compra #') || 
                                     e.description.includes('Merma/Rotura');
+        
+        // Skip purchase-related expenses in P&L as inventory is an asset, 
+        // and its cost is already handled via Cost of Goods Sold (COGS)
+        const isPurchaseRelated = !!e.purchaseId || 
+                                  e.description.toLowerCase().includes('compra') ||
+                                  e.description.toLowerCase().includes('mercancia') ||
+                                  e.description.toLowerCase().includes('mercancía') ||
+                                  e.description.toLowerCase().includes('suministros') ||
+                                  e.description.toLowerCase().includes('insumos');
+        if (isPurchaseRelated) return;
         
         if (isTransactionRelated) {
           totalTransactionExpenses += e.amount;
